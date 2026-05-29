@@ -1,0 +1,104 @@
+{
+  "manifest_version": 3,
+  "name": "GPAGO 자동 분석",
+  "version": "1.7.35",
+  "description": "네이버 쇼핑 검색 페이지에서 아이콘 클릭 한 번으로 shoppingResult JSON을 GPAGO로 전송하여 자동 분석합니다.",
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": [
+    "https://search.shopping.naver.com/*",
+    "https://gpago.vercel.app/*",
+    "https://itemscout.io/*",
+    "https://smartstore.naver.com/*",
+    "https://brand.naver.com/*",
+    "https://shopping.naver.com/*"
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "GPAGO로 자동 분석 (Ctrl+Q)",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Q",
+        "mac": "Command+Shift+Q"
+      },
+      "description": "GPAGO 자동 분석 실행 (아이콘 클릭과 동일)"
+    },
+    "run-gpago-analysis": {
+      "suggested_key": {
+        "default": "Ctrl+Q",
+        "mac": "Command+Shift+Q"
+      },
+      "description": "GPAGO 자동 분석 (대체 단축키)"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://search.shopping.naver.com/*"],
+      "js": ["content-naver.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://gpago.vercel.app/*"],
+      "js": ["content-gpago.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://itemscout.io/*"],
+      "js": ["content-itemscout.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://smartstore.naver.com/*/products/*",
+        "https://brand.naver.com/*/products/*"
+      ],
+      "js": ["inject-smartstore.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://smartstore.naver.com/*/products/*",
+        "https://brand.naver.com/*/products/*"
+      ],
+      "js": ["content-smartstore.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject-naver.js"],
+      "matches": ["https://search.shopping.naver.com/*"]
+    },
+    {
+      "resources": ["inject-itemscout.js"],
+      "matches": ["https://itemscout.io/*"]
+    },
+    {
+      "resources": ["inject-smartstore.js"],
+      "matches": [
+        "https://smartstore.naver.com/*",
+        "https://brand.naver.com/*"
+      ]
+    }
+  ]
+}
