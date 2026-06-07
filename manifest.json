@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GPAGO 자동 분석",
-  "version": "1.7.43",
+  "version": "1.7.44",
   "description": "네이버 쇼핑 검색 페이지에서 아이콘 클릭 한 번으로 shoppingResult JSON을 GPAGO로 전송하여 자동 분석합니다.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
@@ -11,7 +11,8 @@
     "https://smartstore.naver.com/*",
     "https://brand.naver.com/*",
     "https://shopping.naver.com/*",
-    "https://sell.smartstore.naver.com/*"
+    "https://sell.smartstore.naver.com/*",
+    "https://bizadvisor.naver.com/*"
   ],
   "icons": {
     "16": "icons/icon-16.png",
@@ -85,10 +86,13 @@
       "all_frames": false
     },
     {
-      "matches": ["https://sell.smartstore.naver.com/*"],
+      "matches": [
+        "https://sell.smartstore.naver.com/*",
+        "https://bizadvisor.naver.com/*"
+      ],
       "js": ["content-bizadvisor.js"],
       "run_at": "document_start",
-      "all_frames": false
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [
@@ -109,7 +113,10 @@
     },
     {
       "resources": ["inject-bizadvisor.js"],
-      "matches": ["https://sell.smartstore.naver.com/*"]
+      "matches": [
+        "https://sell.smartstore.naver.com/*",
+        "https://bizadvisor.naver.com/*"
+      ]
     }
   ]
 }

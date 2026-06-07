@@ -519,25 +519,26 @@ async function collectBizadvisor(gpagoTab) {
   try {
     await chrome.tabs.sendMessage(tab.id, {
       type: 'BIZ_SHOW_BANNER',
-      message: '🟢 GPAGO 수집 중 — 좌측 [데이터분석 ▸ 판매분석 ▸ 판매성과]로 이동해 키워드/검색채널 데이터를 한 번 보세요. 화면에 데이터가 뜨면 자동 수집됩니다. (수집되면 이 창은 자동으로 닫힙니다)'
+      message: '🟢 GPAGO 수집 중 — 좌측 [데이터분석 ▸ 판매분석 ▸ 판매성과]로 이동해 키워드/검색채널 데이터를 화면에 띄워주세요. 실제 데이터가 잡히면 이 창은 자동으로 닫힙니다. (다 보셨으면 창을 닫아도 됩니다)'
     });
   } catch (_) {}
 
-  // 최대 120초 동안 캡처 누적 폴링 — 일정 개수 이상 모이고 안정되면 종료
+  // 최대 180초 동안 폴링 — 토큰(createToken)이 아닌 "실제 데이터" 응답이 잡히고 안정되면 종료
+  const isToken = (u) => /createtoken|delegate|\/token/i.test(String(u || ''));
   const start = Date.now();
   let captures = [];
-  let stableSince = 0;
-  let lastCount = 0;
-  while (Date.now() - start < 120000) {
-    // 팝업이 닫혔으면 종료
-    try { await chrome.windows.get(win.id); } catch (_) { break; }
+  let lastDataCount = 0;
+  let dataStableSince = 0;
+  while (Date.now() - start < 180000) {
+    try { await chrome.windows.get(win.id); } catch (_) { break; } // 팝업 닫히면 종료
     try {
       const s = await chrome.storage.local.get('bizadvisorCaptures');
       captures = s.bizadvisorCaptures || [];
     } catch (_) {}
-    if (captures.length !== lastCount) { lastCount = captures.length; stableSince = Date.now(); }
-    // 캡처가 1개 이상 있고 6초간 추가 캡처가 없으면 충분히 모인 것으로 판단
-    if (captures.length > 0 && stableSince && (Date.now() - stableSince > 6000)) break;
+    const dataCount = captures.filter(c => !isToken(c.url)).length;
+    if (dataCount !== lastDataCount) { lastDataCount = dataCount; dataStableSince = Date.now(); }
+    // 실데이터가 1개 이상이고 8초간 추가 데이터가 없으면 종료
+    if (dataCount > 0 && dataStableSince && (Date.now() - dataStableSince > 8000)) break;
     await new Promise(r => setTimeout(r, 1000));
   }
 
