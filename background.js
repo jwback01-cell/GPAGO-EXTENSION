@@ -504,7 +504,8 @@ async function runGpagoFromGpagoTab(gpagoTab, deep) {
 //   페이지가 호출하는 API 응답을 content-bizadvisor 가 캡처 → storage 에 누적 → 여기서 회수해 GPAGO 로 전달
 async function collectBizadvisor(gpagoTab) {
   try { await chrome.storage.local.remove('bizadvisorCaptures'); } catch (_) {}
-  const url = 'https://sell.smartstore.naver.com/#/bizadvisor/sales';
+  // 데이터분석 ▸ 마케팅분석(검색채널) 페이지로 바로 열기
+  const url = 'https://sell.smartstore.naver.com/#/bizadvisor/marketing';
   let win;
   try {
     win = await chrome.windows.create({ url, type: 'popup', width: 1180, height: 800, focused: true });
@@ -519,26 +520,33 @@ async function collectBizadvisor(gpagoTab) {
   try {
     await chrome.tabs.sendMessage(tab.id, {
       type: 'BIZ_SHOW_BANNER',
-      message: '🟢 GPAGO 수집 중 — 좌측 [데이터분석 ▸ 판매분석 ▸ 판매성과]로 이동해 키워드/검색채널 데이터를 화면에 띄워주세요. 실제 데이터가 잡히면 이 창은 자동으로 닫힙니다. (다 보셨으면 창을 닫아도 됩니다)'
+      message: '🟢 GPAGO 수집 중 — [데이터분석 ▸ 마케팅분석 ▸ 검색채널] 화면을 열어 키워드 데이터가 화면에 보이게 해주세요. 키워드 데이터가 잡히면 이 창은 자동으로 닫힙니다.'
     });
   } catch (_) {}
 
-  // 최대 180초 동안 폴링 — 토큰(createToken)이 아닌 "실제 데이터" 응답이 잡히고 안정되면 종료
-  const isToken = (u) => /createtoken|delegate|\/token/i.test(String(u || ''));
+  // 검색채널 키워드 리포트(ref_keyword)가 잡힐 때까지 대기 — 판매성과 등 다른 데이터에 일찍 멈추지 않도록
+  const hasKeywordReport = (caps) => caps.some(c => {
+    const u = String(c.url || '');
+    if (/ref_keyword|search-channel/i.test(u)) return true;
+    const d = c.data;
+    if (c && c.truncated) return /ref_keyword/.test((d && d.sample) || '');
+    if (Array.isArray(d) && d[0] && (typeof d[0] === 'object') && ('ref_keyword' in d[0])) return true;
+    return false;
+  });
   const start = Date.now();
   let captures = [];
-  let lastDataCount = 0;
-  let dataStableSince = 0;
+  let kwSince = 0;
+  let hadKw = false;
   while (Date.now() - start < 180000) {
     try { await chrome.windows.get(win.id); } catch (_) { break; } // 팝업 닫히면 종료
     try {
       const s = await chrome.storage.local.get('bizadvisorCaptures');
       captures = s.bizadvisorCaptures || [];
     } catch (_) {}
-    const dataCount = captures.filter(c => !isToken(c.url)).length;
-    if (dataCount !== lastDataCount) { lastDataCount = dataCount; dataStableSince = Date.now(); }
-    // 실데이터가 1개 이상이고 8초간 추가 데이터가 없으면 종료
-    if (dataCount > 0 && dataStableSince && (Date.now() - dataStableSince > 8000)) break;
+    const kw = hasKeywordReport(captures);
+    if (kw && !hadKw) { hadKw = true; kwSince = Date.now(); }
+    // 키워드 리포트가 잡히고 5초간 안정되면 종료
+    if (hadKw && kwSince && (Date.now() - kwSince > 5000)) break;
     await new Promise(r => setTimeout(r, 1000));
   }
 

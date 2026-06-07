@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GPAGO 자동 분석",
-  "version": "1.7.45",
+  "version": "1.7.46",
   "description": "네이버 쇼핑 검색 페이지에서 아이콘 클릭 한 번으로 shoppingResult JSON을 GPAGO로 전송하여 자동 분석합니다.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
