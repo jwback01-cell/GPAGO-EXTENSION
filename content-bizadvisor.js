@@ -23,7 +23,7 @@
       let entry = { url: url, at: Date.now(), truncated: false, data: data };
       try {
         const str = JSON.stringify(data);
-        if (str.length > 200000) {
+        if (str.length > 1500000) {
           entry.truncated = true;
           entry.data = {
             __truncated: true,
@@ -39,7 +39,7 @@
       const idx = arr.findIndex(x => x.url === url);
       if (idx >= 0) arr.splice(idx, 1);
       arr.unshift(entry);
-      if (arr.length > 30) arr.length = 30;
+      if (arr.length > 15) arr.length = 15;
       await chrome.storage.local.set({ bizadvisorCaptures: arr });
       console.log('[GPAGO biz] captured:', url, entry.truncated ? '(truncated)' : '');
     } catch (_) {}
