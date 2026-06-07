@@ -297,7 +297,17 @@ async function runGpagoFromGpagoTab(gpagoTab, deep) {
   if (!triggerSent) console.warn('[GPAGO bg] TRIGGER_ONCE 전송 실패 (3회 시도)');
 
   // 캡처 대기 (네이버페이 0.9초 + 전체 0.9초 + 마진 + strict-search 자동 클릭 후 reload 여유)
-  const quickCaptured = await waitForCapture(naverUrl, 9000);
+  let quickCaptured = await waitForCapture(naverUrl, 9000);
+
+  // v1.7.42+ : 보안 확인(캡차) 대응 ──────────────────────────────────────
+  //   9초 안에 캡처가 안 되면 보안 확인 페이지일 가능성이 높다.
+  //   (기존: 즉시 alert → 사용자가 GPAGO 를 새로고침하고 재검색해야 했음)
+  //   이제는 팝업을 앞으로 띄우고 안내 배너를 표시한 뒤, 사용자가 보안 확인을
+  //   완료해 결과 페이지가 로드되면 자동으로 캡처해 그대로 이어서 분석한다.
+  if (!quickCaptured) {
+    quickCaptured = await waitForCaptureAfterSecurity(naverTab.id, naverWindowId, naverUrl);
+  }
+
   if (quickCaptured) {
     await new Promise(r => setTimeout(r, 1000));
     const { naverCapturesByTab: page1Tabs } = await chrome.storage.local.get('naverCapturesByTab');
@@ -482,11 +492,60 @@ async function runGpagoFromGpagoTab(gpagoTab, deep) {
     return;
   }
 
-  // 캡처 실패 — 팝업 윈도우를 포커스로 가져와서 사용자가 보고 직접 처리하도록
+  // 캡처 실패 (보안 확인 대기 90초까지도 결과 캡처 안 됨) — 사용자가 직접 처리하도록 안내
   try { await chrome.windows.update(naverWindowId, { focused: true }); } catch (_) {}
   await chrome.storage.local.remove('gpagoListenMode');
   await alertOnTab(naverTab.id, 'GPAGO 자동 분석',
-    '검색 결과 캡처 실패. 팝업 창에서 직접 정렬·페이징을 한 번 바꿔주세요.');
+    '검색 결과 캡처에 실패했습니다. 보안 확인을 완료했는데도 이 메시지가 보이면, 팝업 창에서 정렬·페이징을 한 번 바꾸거나 GPAGO 에서 다시 검색해 주세요.');
+}
+
+// v1.7.43+ : 스마트스토어센터(비즈어드바이저) 판매성과/키워드 데이터 자동 수집
+//   셀러센터를 팝업으로 열고, 사용자가 판매분석>판매성과(검색채널) 화면을 보는 동안
+//   페이지가 호출하는 API 응답을 content-bizadvisor 가 캡처 → storage 에 누적 → 여기서 회수해 GPAGO 로 전달
+async function collectBizadvisor(gpagoTab) {
+  try { await chrome.storage.local.remove('bizadvisorCaptures'); } catch (_) {}
+  const url = 'https://sell.smartstore.naver.com/#/bizadvisor/sales';
+  let win;
+  try {
+    win = await chrome.windows.create({ url, type: 'popup', width: 1180, height: 800, focused: true });
+  } catch (e) {
+    try { await chrome.tabs.sendMessage(gpagoTab.id, { type: 'GPAGO_BIZADVISOR_RESULT', ok: false, error: '팝업 생성 실패: ' + (e && e.message || e) }); } catch (_) {}
+    return;
+  }
+  const tab = win.tabs && win.tabs[0];
+  if (!tab) return;
+  await waitForTabLoad(tab.id, 20000);
+  await new Promise(r => setTimeout(r, 2000));
+  try {
+    await chrome.tabs.sendMessage(tab.id, {
+      type: 'BIZ_SHOW_BANNER',
+      message: '🟢 GPAGO 수집 중 — 좌측 [데이터분석 ▸ 판매분석 ▸ 판매성과]로 이동해 키워드/검색채널 데이터를 한 번 보세요. 화면에 데이터가 뜨면 자동 수집됩니다. (수집되면 이 창은 자동으로 닫힙니다)'
+    });
+  } catch (_) {}
+
+  // 최대 120초 동안 캡처 누적 폴링 — 일정 개수 이상 모이고 안정되면 종료
+  const start = Date.now();
+  let captures = [];
+  let stableSince = 0;
+  let lastCount = 0;
+  while (Date.now() - start < 120000) {
+    // 팝업이 닫혔으면 종료
+    try { await chrome.windows.get(win.id); } catch (_) { break; }
+    try {
+      const s = await chrome.storage.local.get('bizadvisorCaptures');
+      captures = s.bizadvisorCaptures || [];
+    } catch (_) {}
+    if (captures.length !== lastCount) { lastCount = captures.length; stableSince = Date.now(); }
+    // 캡처가 1개 이상 있고 6초간 추가 캡처가 없으면 충분히 모인 것으로 판단
+    if (captures.length > 0 && stableSince && (Date.now() - stableSince > 6000)) break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  try { await chrome.tabs.sendMessage(tab.id, { type: 'BIZ_HIDE_BANNER' }); } catch (_) {}
+  try { await chrome.tabs.sendMessage(gpagoTab.id, { type: 'GPAGO_BIZADVISOR_RESULT', ok: true, captures: captures }); } catch (_) {}
+  try { await chrome.tabs.update(gpagoTab.id, { active: true }); await chrome.windows.update(gpagoTab.windowId, { focused: true }); } catch (_) {}
+  try { await chrome.windows.remove(win.id); } catch (_) {}
+  console.log('[GPAGO bg] 비즈어드바이저 수집 완료 —', captures.length, '개 응답');
 }
 
 // 메인 핸들러 — 아이콘 클릭/단축키 모두 이 함수를 호출
@@ -618,7 +677,19 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   if (msg && msg.type === 'GPAGO_TRIGGER_FROM_GPAGO' && sender?.tab) {
     const deep = Number(msg.deep || 0) || 0;  // v1.7.29+ : deep>0 이면 N 페이지 순차 캡처
     console.log('[GPAGO bg] GPAGO 페이지에서 트리거 요청 받음 — keyword:', msg.keyword, '| deep:', deep);
-    runGpagoFromGpagoTab(sender.tab, deep);
+    // v1.7.42+ : 보안 확인 대기(최대 90초) 동안 service worker 가 죽지 않도록 keep-alive
+    const _trigReqId = 'trig_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    _gpagoStartKeepAlive(_trigReqId);
+    Promise.resolve(runGpagoFromGpagoTab(sender.tab, deep))
+      .finally(() => _gpagoStopKeepAlive(_trigReqId));
+    return false;
+  }
+  // v1.7.43+ : 키워드 성과분석 — 스마트스토어센터 데이터 수집 요청
+  if (msg && msg.type === 'GPAGO_REQUEST_BIZADVISOR' && sender?.tab) {
+    const _bizReqId = 'biz_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    _gpagoStartKeepAlive(_bizReqId);
+    Promise.resolve(collectBizadvisor(sender.tab))
+      .finally(() => _gpagoStopKeepAlive(_bizReqId));
     return false;
   }
   // ⚡ GPAGO 키워드 순위 카드 → 스마트스토어 빠른 모드 (v1.6.5+ 비활성화)
@@ -919,6 +990,52 @@ function waitForCapture(currentTabUrl, timeoutMs) {
     };
     tick();
   });
+}
+
+// v1.7.42+ : 보안 확인(캡차) 통과 대기 — 9초 quick 캡처 실패 후 호출됨.
+//   팝업을 포커스로 띄우고 안내 배너를 표시한 뒤, 사용자가 보안 확인을 완료해
+//   결과 페이지가 로드되면 자동으로 캡처되는 것을 최대 WAIT_TIMEOUT_MS 동안 기다린다.
+//   → 사용자가 GPAGO 를 새로고침하거나 재검색할 필요 없이 그대로 이어짐.
+//   (blocking alert 대신 배너 사용 — alert 는 캡차 입력 자체를 막기 때문)
+async function waitForCaptureAfterSecurity(naverTabId, naverWindowId, naverUrl) {
+  console.log('[GPAGO bg] 보안 확인 추정 — 캡차 완료 대기 모드 진입 (최대', WAIT_TIMEOUT_MS / 1000, '초)');
+  // 팝업을 앞으로 가져와 사용자가 보안 확인(캡차)을 바로 풀 수 있게
+  try { await chrome.windows.update(naverWindowId, { focused: true }); } catch (_) {}
+  // gpagoListenMode 유지 — 보안 확인 통과 후 content/inject 가 계속 캡처하도록
+  // 안내 배너 표시 (content-naver 의 GPAGO_SHOW_BANNER 핸들러)
+  try {
+    await chrome.tabs.sendMessage(naverTabId, {
+      type: 'GPAGO_SHOW_BANNER',
+      message: '🔒 보안 확인을 완료해 주세요. 완료하면 자동으로 분석이 이어집니다 — 새로고침하지 마세요.'
+    });
+  } catch (_) {}
+
+  const start = Date.now();
+  let lastNudge = 0;
+  let result = null;
+  while (Date.now() - start < WAIT_TIMEOUT_MS) {
+    // 이 대기 시작 이후의 새 캡처만 인정 (보안 확인 통과 후 로드된 결과)
+    try {
+      const { lastNaverCapture } = await chrome.storage.local.get('lastNaverCapture');
+      if (lastNaverCapture &&
+          lastNaverCapture.capturedAt > start - 1000 &&
+          sameSearchKeyword(lastNaverCapture.url, naverUrl)) {
+        result = lastNaverCapture.data;
+        console.log('[GPAGO bg] 보안 확인 완료 감지 — 캡처 도착, 분석 재개');
+        break;
+      }
+    } catch (_) {}
+    // 3초마다 passive 재추출 nudge (결과가 떠 있는데 캡처가 늦는 경우 대비 — 페이지 조작 없음)
+    if (Date.now() - lastNudge > 3000) {
+      lastNudge = Date.now();
+      try { await chrome.tabs.sendMessage(naverTabId, { type: 'GPAGO_RETRY_STATIC' }); } catch (_) {}
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+
+  // 배너 제거
+  try { await chrome.tabs.sendMessage(naverTabId, { type: 'GPAGO_HIDE_BANNER' }); } catch (_) {}
+  return result;
 }
 
 async function sendToGpago(data) {
