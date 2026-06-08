@@ -503,7 +503,7 @@ async function runGpagoFromGpagoTab(gpagoTab, deep) {
 //   셀러센터를 팝업으로 열고, 사용자가 판매분석>판매성과(검색채널) 화면을 보는 동안
 //   페이지가 호출하는 API 응답을 content-bizadvisor 가 캡처 → storage 에 누적 → 여기서 회수해 GPAGO 로 전달
 async function collectBizadvisor(gpagoTab) {
-  try { await chrome.storage.local.remove('bizadvisorCaptures'); } catch (_) {}
+  try { await chrome.storage.local.remove(['bizadvisorCaptures', 'bizadvisorRequests']); } catch (_) {}
   // 데이터분석 ▸ 마케팅분석(검색채널) 페이지로 바로 열기
   const url = 'https://sell.smartstore.naver.com/#/bizadvisor/marketing';
   let win;
@@ -550,8 +550,10 @@ async function collectBizadvisor(gpagoTab) {
     await new Promise(r => setTimeout(r, 1000));
   }
 
+  let requests = [];
+  try { const sr = await chrome.storage.local.get('bizadvisorRequests'); requests = sr.bizadvisorRequests || []; } catch (_) {}
   try { await chrome.tabs.sendMessage(tab.id, { type: 'BIZ_HIDE_BANNER' }); } catch (_) {}
-  try { await chrome.tabs.sendMessage(gpagoTab.id, { type: 'GPAGO_BIZADVISOR_RESULT', ok: true, captures: captures }); } catch (_) {}
+  try { await chrome.tabs.sendMessage(gpagoTab.id, { type: 'GPAGO_BIZADVISOR_RESULT', ok: true, captures: captures, requests: requests }); } catch (_) {}
   try { await chrome.tabs.update(gpagoTab.id, { active: true }); await chrome.windows.update(gpagoTab.windowId, { focused: true }); } catch (_) {}
   try { await chrome.windows.remove(win.id); } catch (_) {}
   console.log('[GPAGO bg] 비즈어드바이저 수집 완료 —', captures.length, '개 응답');

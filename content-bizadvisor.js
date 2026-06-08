@@ -12,6 +12,23 @@
   }
 
   // 2) inject 가 보낸 캡처 → storage 누적 (최근 30개, 큰 응답은 슬림화)
+  // 요청 메타 저장 (직접 API 호출 인증 방식 파악용)
+  window.addEventListener('message', async (e) => {
+    if (e.source !== window) return;
+    if (!e.data || e.data.source !== 'gpago-biz-inject' || e.data.type !== 'BIZ_REQ') return;
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) return;
+      const entry = { url: e.data.url || '', method: e.data.method || 'GET', headers: e.data.headers || {}, body: e.data.body || null, at: Date.now() };
+      const store = await chrome.storage.local.get('bizadvisorRequests');
+      const arr = store.bizadvisorRequests || [];
+      const idx = arr.findIndex(x => x.url === entry.url);
+      if (idx >= 0) arr.splice(idx, 1);
+      arr.unshift(entry);
+      if (arr.length > 20) arr.length = 20;
+      await chrome.storage.local.set({ bizadvisorRequests: arr });
+    } catch (_) {}
+  });
+
   window.addEventListener('message', async (e) => {
     if (e.source !== window) return;
     if (!e.data || e.data.source !== 'gpago-biz-inject') return;

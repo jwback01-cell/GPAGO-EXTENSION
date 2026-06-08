@@ -148,7 +148,8 @@ chrome.runtime.onMessage.addListener((msg) => {
       type: 'GPAGO_BIZADVISOR_RESULT',
       ok: !!msg.ok,
       error: msg.error || null,
-      captures: msg.captures || []
+      captures: msg.captures || [],
+      requests: msg.requests || []
     }, window.location.origin);
   }
 });

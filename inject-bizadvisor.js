@@ -19,13 +19,31 @@
       window.postMessage({ source: 'gpago-biz-inject', type: 'BIZ_CAPTURED', url: String(url), data: data }, window.location.origin);
     } catch (_) {}
   }
+  // 요청 메타(메서드/헤더/바디) 전송 — 직접 API 호출용 인증 방식 파악
+  function sendReq(url, method, headers, body) {
+    try {
+      window.postMessage({ source: 'gpago-biz-inject', type: 'BIZ_REQ', url: String(url), method: method || 'GET', headers: headers || {}, body: (typeof body === 'string' ? body.slice(0, 2000) : null) }, window.location.origin);
+    } catch (_) {}
+  }
+  function _hdrToObj(h) {
+    const o = {};
+    try {
+      if (!h) return o;
+      if (typeof h.forEach === 'function') h.forEach((v, k) => { o[k] = v; });
+      else if (Array.isArray(h)) h.forEach(([k, v]) => { o[k] = v; });
+      else if (typeof h === 'object') Object.keys(h).forEach(k => { o[k] = h[k]; });
+    } catch (_) {}
+    return o;
+  }
 
   // fetch 래핑 (관찰만)
   const origFetch = window.fetch;
   window.fetch = function (...args) {
     const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+    const init = args[1] || {};
     const p = origFetch.apply(this, args);
     if (looksLikeData(url)) {
+      try { sendReq(url, init.method || (args[0] && args[0].method) || 'GET', _hdrToObj(init.headers || (args[0] && args[0].headers)), init.body); } catch (_) {}
       p.then(res => {
         try {
           res.clone().text().then(text => {
@@ -44,13 +62,21 @@
   // XHR 래핑 (관찰만)
   const origOpen = XMLHttpRequest.prototype.open;
   const origSend = XMLHttpRequest.prototype.send;
+  const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__gpago_biz_url__ = url;
+    this.__gpago_biz_method__ = method;
+    this.__gpago_biz_hdrs__ = {};
     return origOpen.apply(this, arguments);
   };
-  XMLHttpRequest.prototype.send = function () {
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    try { if (this.__gpago_biz_hdrs__) this.__gpago_biz_hdrs__[k] = v; } catch (_) {}
+    return origSetHeader.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
     const xhr = this;
     if (looksLikeData(xhr.__gpago_biz_url__)) {
+      try { sendReq(xhr.__gpago_biz_url__, xhr.__gpago_biz_method__ || 'GET', xhr.__gpago_biz_hdrs__ || {}, body); } catch (_) {}
       xhr.addEventListener('load', function () {
         try {
           const text = xhr.responseText;
