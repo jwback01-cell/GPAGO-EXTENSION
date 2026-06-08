@@ -221,6 +221,41 @@ async function tryDirectFetchSearch(keyword, productSet) {
   finally { clearTimeout(timeoutId); }
 }
 
+// v1.7.48+ : 키워드 정확 텀즈(NLU) 조회 — 네이버 쇼핑 검색 직접 fetch 후 terms/nluTerms 만 추출 (상품수 무관)
+async function fetchKeywordTerms(keyword) {
+  if (!keyword) return null;
+  const url = 'https://search.shopping.naver.com/search/all?'
+    + new URLSearchParams({ query: keyword, pagingSize: '40', productSet: 'total' }).toString();
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetch(url, {
+      credentials: 'include', signal: ctrl.signal,
+      headers: { 'Accept': 'text/html', 'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8' },
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) return null;
+    const html = await res.text();
+    const m = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]+?)<\/script>/);
+    if (!m) return null;
+    const data = JSON.parse(m[1]);
+    const SKIP = new Set(['_owner','stateNode','return','child','sibling','alternate']);
+    let found = null;
+    function walk(o, d, seen) {
+      if (found || !o || typeof o !== 'object' || d > 14 || seen.has(o)) return;
+      seen.add(o);
+      if (o.shoppingResult && (Array.isArray(o.shoppingResult.terms) || Array.isArray(o.shoppingResult.nluTerms))) { found = o.shoppingResult; return; }
+      if (Array.isArray(o.terms) && Array.isArray(o.nluTerms)) { found = o; return; }
+      if (Array.isArray(o)) { for (let i = 0; i < o.length && i < 300 && !found; i++) walk(o[i], d + 1, seen); return; }
+      for (const k in o) { if (found) return; if (SKIP.has(k)) continue; if (o[k] && typeof o[k] === 'object') walk(o[k], d + 1, seen); }
+    }
+    walk(data, 0, new WeakSet());
+    if (!found) return null;
+    return { terms: Array.isArray(found.terms) ? found.terms : [], nluTerms: Array.isArray(found.nluTerms) ? found.nluTerms : [] };
+  } catch (_) { return null; }
+  finally { clearTimeout(timeoutId); }
+}
+
 async function runGpagoFromGpagoTab(gpagoTab, deep) {
   const deepPages = Math.max(1, Math.min(13, Number(deep) || 1));  // 1~13페이지 (80~1040개)
   const keyword = await readGpagoNKeyword(gpagoTab.id);
@@ -693,6 +728,23 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     _gpagoStartKeepAlive(_trigReqId);
     Promise.resolve(runGpagoFromGpagoTab(sender.tab, deep))
       .finally(() => _gpagoStopKeepAlive(_trigReqId));
+    return false;
+  }
+  // v1.7.48+ : 키워드 정확 텀즈(NLU) 조회 — 네이버 쇼핑 검색 직접 fetch
+  if (msg && msg.type === 'GPAGO_GET_TERMS' && sender?.tab) {
+    const senderTabId = sender.tab.id;
+    (async () => {
+      const r = await fetchKeywordTerms(msg.keyword || '');
+      try {
+        chrome.tabs.sendMessage(senderTabId, {
+          type: 'GPAGO_TERMS_RESULT',
+          reqId: msg.reqId || '',
+          keyword: msg.keyword || '',
+          terms: r ? r.terms : null,
+          nluTerms: r ? r.nluTerms : null,
+        });
+      } catch (_) {}
+    })();
     return false;
   }
   // v1.7.43+ : 키워드 성과분석 — 스마트스토어센터 데이터 수집 요청

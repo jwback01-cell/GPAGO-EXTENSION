@@ -114,6 +114,9 @@ window.addEventListener('message', (e) => {
   } else if (e.data.type === 'GPAGO_REQUEST_BIZADVISOR') {
     // 키워드 성과분석 — 스마트스토어센터 데이터 수집 요청 (v1.7.43+)
     try { chrome.runtime.sendMessage({ type: 'GPAGO_REQUEST_BIZADVISOR' }); } catch (_) {}
+  } else if (e.data.type === 'GPAGO_GET_TERMS') {
+    // 키워드 정확 텀즈(NLU) 조회 (v1.7.48+)
+    try { chrome.runtime.sendMessage({ type: 'GPAGO_GET_TERMS', keyword: e.data.keyword || '', reqId: e.data.reqId || '' }); } catch (_) {}
   }
 });
 
@@ -140,6 +143,16 @@ chrome.runtime.onMessage.addListener((msg) => {
       // 기존 방식 호환성 (v1.3.x): fetch 한 HTML 문자열
       html: msg.html || null,
       htmlLen: msg.htmlLen || 0
+    }, window.location.origin);
+  } else if (msg.type === 'GPAGO_TERMS_RESULT') {
+    // 키워드 정확 텀즈 결과 → 페이지로 전달 (v1.7.48+)
+    window.postMessage({
+      source: 'gpago-extension',
+      type: 'GPAGO_TERMS_RESULT',
+      reqId: msg.reqId || '',
+      keyword: msg.keyword || '',
+      terms: msg.terms || null,
+      nluTerms: msg.nluTerms || null
     }, window.location.origin);
   } else if (msg.type === 'GPAGO_BIZADVISOR_RESULT') {
     // 스마트스토어센터 수집 결과 → 페이지로 전달 (v1.7.43+)
