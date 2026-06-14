@@ -340,7 +340,7 @@ async function runGpagoFromGpagoTab(gpagoTab, deep) {
   //   이제는 팝업을 앞으로 띄우고 안내 배너를 표시한 뒤, 사용자가 보안 확인을
   //   완료해 결과 페이지가 로드되면 자동으로 캡처해 그대로 이어서 분석한다.
   if (!quickCaptured) {
-    quickCaptured = await waitForCaptureAfterSecurity(naverTab.id, naverWindowId, naverUrl);
+    quickCaptured = await waitForCaptureAfterSecurity(naverTab.id, naverWindowId, naverUrl, keyword);
   }
 
   if (quickCaptured) {
@@ -537,10 +537,10 @@ async function runGpagoFromGpagoTab(gpagoTab, deep) {
 // v1.7.43+ : 스마트스토어센터(비즈어드바이저) 판매성과/키워드 데이터 자동 수집
 //   셀러센터를 팝업으로 열고, 사용자가 판매분석>판매성과(검색채널) 화면을 보는 동안
 //   페이지가 호출하는 API 응답을 content-bizadvisor 가 캡처 → storage 에 누적 → 여기서 회수해 GPAGO 로 전달
-async function collectBizadvisor(gpagoTab) {
+async function collectBizadvisor(gpagoTab, targetRange) {
   try { await chrome.storage.local.remove(['bizadvisorCaptures', 'bizadvisorRequests']); } catch (_) {}
-  // 데이터분석 ▸ 마케팅분석(검색채널) 페이지로 바로 열기
-  const url = 'https://sell.smartstore.naver.com/#/bizadvisor/marketing';
+  // 데이터분석 ▸ 판매분석 ▸ 상품/검색채널 페이지로 바로 열기 (상품별 키워드 리포트가 여기서 호출됨)
+  const url = 'https://sell.smartstore.naver.com/#/bizadvisor/sales';
   let win;
   try {
     win = await chrome.windows.create({ url, type: 'popup', width: 1180, height: 800, focused: true });
@@ -555,7 +555,7 @@ async function collectBizadvisor(gpagoTab) {
   try {
     await chrome.tabs.sendMessage(tab.id, {
       type: 'BIZ_SHOW_BANNER',
-      message: '🟢 GPAGO 수집 중 — [데이터분석 ▸ 마케팅분석 ▸ 검색채널] 화면을 열어 키워드 데이터가 화면에 보이게 해주세요. 키워드 데이터가 잡히면 이 창은 자동으로 닫힙니다.'
+      message: '🟢 GPAGO 수집 중 — ' + (targetRange && targetRange.start ? ('<b>조회기간을 ' + targetRange.start + ' ~ ' + targetRange.end + '</b> 로 맞춘 뒤 ') : '') + '①[판매분석 ▸ 상품/검색채널] (하단 표의 <b>상품카테고리차원을 "상품"</b>으로 바꾸면 전체 상품 결제 수집), ②[마케팅분석 ▸ 검색채널](키워드 유입수), ③[마케팅분석 ▸ 상품노출성과](평균노출순위) 화면을 열어주세요. 데이터가 잡히면 창이 자동으로 닫힙니다.'
     });
   } catch (_) {}
 
@@ -566,6 +566,25 @@ async function collectBizadvisor(gpagoTab) {
     const d = c.data;
     if (c && c.truncated) return /ref_keyword/.test((d && d.sample) || '');
     if (Array.isArray(d) && d[0] && (typeof d[0] === 'object') && ('ref_keyword' in d[0])) return true;
+    return false;
+  });
+  // v1.7.65+ : 유입(검색채널 키워드 리포트) 캡처 감지 — ref_keyword + 유입 metric(num_interaction 등)을 동시에 가진 행만 인정
+  //   (판매성과 첫화면의 방문자 metric 등에 잘못 매칭돼 일찍 닫히는 것 방지)
+  const _inflowRe = /num_interaction|simple_num_users|num_visit/i;
+  const _rankRe = /노출순위|exposure.*rank|avg.*rank|average.*rank|exposure.*index|avg_index/i;
+  const _kwRowRe = (d, re) => {
+    if (Array.isArray(d) && d[0] && typeof d[0] === 'object') { if (!('ref_keyword' in d[0]) && !('keyword' in d[0])) return false; for (const k in d[0]) { if (re.test(k)) return true; } }
+    return false;
+  };
+  const hasInflowReport = (caps) => caps.some(c => { if (String(c && c.url || '').startsWith('__gpago_')) return false; const d = c && c.data; if (c && c.truncated) { const s = (d && d.sample) || ''; return /ref_keyword|keyword/.test(s) && _inflowRe.test(s); } return _kwRowRe(d, _inflowRe); });
+  const hasRankReport = (caps) => caps.some(c => { if (String(c && c.url || '').startsWith('__gpago_')) return false; const d = c && c.data; if (c && c.truncated) { const s = (d && d.sample) || ''; return /ref_keyword|keyword/.test(s) && _rankRe.test(s); } return _kwRowRe(d, _rankRe); });
+  // v1.7.69+ : 상품별 결제(상품/검색채널 pivot) 캡처 감지 — product_name + ref_keyword + pay_amount 동시 보유
+  const _payRe = /pay_amount/i;
+  const hasProductPayReport = (caps) => caps.some(c => {
+    if (String(c && c.url || '').startsWith('__gpago_')) return false;
+    const d = c && c.data;
+    if (c && c.truncated) { const s = (d && d.sample) || ''; return /product_name/.test(s) && /ref_keyword/.test(s) && _payRe.test(s); }
+    if (Array.isArray(d) && d[0] && typeof d[0] === 'object') { if (!('ref_keyword' in d[0]) || !('product_name' in d[0])) return false; for (const k in d[0]) { if (_payRe.test(k)) return true; } }
     return false;
   });
   const start = Date.now();
@@ -580,8 +599,11 @@ async function collectBizadvisor(gpagoTab) {
     } catch (_) {}
     const kw = hasKeywordReport(captures);
     if (kw && !hadKw) { hadKw = true; kwSince = Date.now(); }
-    // 키워드 리포트가 잡히고 5초간 안정되면 종료
-    if (hadKw && kwSince && (Date.now() - kwSince > 5000)) break;
+    const hasInflow = hasInflowReport(captures);
+    const hasRank = hasRankReport(captures);
+    const hasPay = hasProductPayReport(captures);
+    // 상품별 결제(필수) + 유입 + 순위 모두 잡히면 종료. 전체 90초 상한.
+    if (hadKw && ((hasPay && hasInflow && hasRank) || (kwSince && Date.now() - kwSince > 90000))) break;
     await new Promise(r => setTimeout(r, 1000));
   }
 
@@ -747,11 +769,38 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     })();
     return false;
   }
+  // 키워드 분석 — 백그라운드 직접 fetch (보안창/팝업 없이, 사용자 IP·쿠키) → 속성/태그/NLU 포함
+  //   팝업 폴백 없음. 실패하면 GPAGO 페이지가 서버 스크랩/공식 API 로 폴백한다.
+  if (msg && msg.type === 'GPAGO_DIRECT_FETCH' && sender?.tab) {
+    const senderTabId = sender.tab.id;
+    const reqId = msg.reqId || '';
+    const keyword = String(msg.keyword || '');
+    const _dfReqId = 'df_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    _gpagoStartKeepAlive(_dfReqId);
+    (async () => {
+      let tabs = {}, ok = false, err = null;
+      try {
+        const settled = await Promise.allSettled([
+          tryDirectFetchSearch(keyword, 'npay'),
+          tryDirectFetchSearch(keyword, 'total'),
+        ]);
+        const npay  = settled[0].status === 'fulfilled' ? settled[0].value : null;
+        const total = settled[1].status === 'fulfilled' ? settled[1].value : null;
+        if (npay  && npay.products  && npay.products.length)  tabs['네이버페이'] = npay;
+        if (total && total.products && total.products.length) tabs['전체']      = total;
+        ok = Object.keys(tabs).length > 0;
+        if (!ok) err = 'no_products';
+      } catch (e) { err = String(e && e.message || e); }
+      try { chrome.tabs.sendMessage(senderTabId, { type: 'GPAGO_DIRECT_FETCH_RESULT', reqId, ok, tabs, error: err }); } catch (_) {}
+      _gpagoStopKeepAlive(_dfReqId);
+    })();
+    return false;
+  }
   // v1.7.43+ : 키워드 성과분석 — 스마트스토어센터 데이터 수집 요청
   if (msg && msg.type === 'GPAGO_REQUEST_BIZADVISOR' && sender?.tab) {
     const _bizReqId = 'biz_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
     _gpagoStartKeepAlive(_bizReqId);
-    Promise.resolve(collectBizadvisor(sender.tab))
+    Promise.resolve(collectBizadvisor(sender.tab, msg.range || null))
       .finally(() => _gpagoStopKeepAlive(_bizReqId));
     return false;
   }
@@ -759,6 +808,25 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   // 진단 결과 (v1.6.4): Naver SmartStore HTML은 SSR shell — 찜/등록일/태그/리뷰 데이터가 전혀 없음
   // HTML 안에는 "regDate":"" (빈 문자열), reviewCountVisible (표시 플래그) 같은 미끼만 있음
   // → HTML fetch 는 179KB 다운로드하고 실패만 함 → 즉시 fallback 으로 넘김 (1~2초 절약)
+  // v1.7.57+ : 비즈어드바이저 리포트 재요청 — 수집 때 저장한 요청(인증 헤더/쿠키)을 그대로 써서
+  //   dimensions 만 상품 차원으로 바꿔 상품별 데이터를 가져온다. (CORS 없음 — host_permission)
+  if (msg && msg.type === 'GPAGO_BIZ_REPLAY' && sender?.tab) {
+    const senderTabId = sender.tab.id, reqId = msg.reqId;
+    (async () => {
+      let ok = false, status = 0, data = null, err = null;
+      try {
+        const headers = {};
+        for (const k in (msg.headers || {})) { if (/^(host|content-length|cookie|accept-encoding|connection|origin|referer|user-agent)$/i.test(k)) continue; headers[k] = msg.headers[k]; }
+        headers['Accept'] = headers['Accept'] || 'application/json';
+        const r = await fetch(msg.url, { method: msg.method || 'GET', headers, credentials: 'include', body: (msg.method === 'POST' && msg.body) ? msg.body : undefined });
+        status = r.status; ok = r.ok;
+        const t = await r.text(); try { data = JSON.parse(t); } catch (_) { data = { __nonjson: t.slice(0, 300) }; }
+      } catch (e) { err = String(e && e.message || e); }
+      try { chrome.tabs.sendMessage(senderTabId, { type: 'GPAGO_BIZ_REPLAY_RESULT', reqId, ok, status, data, error: err }); } catch (_) {}
+    })();
+    return true;
+  }
+
   if (msg && msg.type === 'GPAGO_FETCH_SMARTSTORE_API' && sender?.tab) {
     (async () => {
       const senderTabId = sender.tab.id;
@@ -1060,7 +1128,7 @@ function waitForCapture(currentTabUrl, timeoutMs) {
 //   결과 페이지가 로드되면 자동으로 캡처되는 것을 최대 WAIT_TIMEOUT_MS 동안 기다린다.
 //   → 사용자가 GPAGO 를 새로고침하거나 재검색할 필요 없이 그대로 이어짐.
 //   (blocking alert 대신 배너 사용 — alert 는 캡차 입력 자체를 막기 때문)
-async function waitForCaptureAfterSecurity(naverTabId, naverWindowId, naverUrl) {
+async function waitForCaptureAfterSecurity(naverTabId, naverWindowId, naverUrl, keyword) {
   console.log('[GPAGO bg] 보안 확인 추정 — 캡차 완료 대기 모드 진입 (최대', WAIT_TIMEOUT_MS / 1000, '초)');
   // 팝업을 앞으로 가져와 사용자가 보안 확인(캡차)을 바로 풀 수 있게
   try { await chrome.windows.update(naverWindowId, { focused: true }); } catch (_) {}
@@ -1075,6 +1143,7 @@ async function waitForCaptureAfterSecurity(naverTabId, naverWindowId, naverUrl) 
 
   const start = Date.now();
   let lastNudge = 0;
+  let lastProbe = 0;
   let result = null;
   while (Date.now() - start < WAIT_TIMEOUT_MS) {
     // 이 대기 시작 이후의 새 캡처만 인정 (보안 확인 통과 후 로드된 결과)
@@ -1093,12 +1162,208 @@ async function waitForCaptureAfterSecurity(naverTabId, naverWindowId, naverUrl) 
       lastNudge = Date.now();
       try { await chrome.tabs.sendMessage(naverTabId, { type: 'GPAGO_RETRY_STATIC' }); } catch (_) {}
     }
+    // v1.7.44+ : 능동 직접 추출 (4초마다) — 캡차를 통과해 결과 페이지가 떠 있으면,
+    //   popup 탭의 인증된 fetch 로 상품 JSON 을 직접 가져온다. passive 캡처/SSR 파싱이
+    //   실패해도(=결과는 보이는데 자동 재개가 안 되던 케이스) 이 경로로 확실히 잡힌다.
+    if (keyword && Date.now() - lastProbe > 4000) {
+      lastProbe = Date.now();
+      try {
+        // 1순위: 이미 렌더링된 페이지의 라이브 상태를 MAIN world 에서 직접 읽음 (안티봇 무관 — 새 요청 안 함)
+        let probe = await extractLiveStateInTab(naverTabId);
+        // 2순위: 라이브 상태에서 못 찾으면 인증 fetch (일부 페이지 형태 대비)
+        if (!probe || !Array.isArray(probe.products) || probe.products.length < 5) {
+          probe = await fetchPageInTab(naverTabId, keyword, 1);
+        }
+        if (probe && Array.isArray(probe.products) && probe.products.length >= 5) {
+          const slim = probe.products.map(_slimProduct);
+          const capData = { query: keyword, products: slim, total: probe.total };
+          const capturedAt = Date.now();
+          await chrome.storage.local.set({
+            lastNaverCapture: { data: capData, url: naverUrl, capturedAt, tab: '전체' },
+            naverCapturesByTab: { '전체': { data: capData, url: naverUrl, capturedAt } }
+          });
+          result = capData;
+          console.log('[GPAGO bg] 보안 확인 통과 — 능동 추출 성공 (' + slim.length + '개), 분석 재개');
+          break;
+        }
+      } catch (_) {}
+    }
     await new Promise(r => setTimeout(r, 250));
   }
 
   // 배너 제거
   try { await chrome.tabs.sendMessage(naverTabId, { type: 'GPAGO_HIDE_BANNER' }); } catch (_) {}
   return result;
+}
+
+// v1.7.44+ : 팝업 탭(popup context) 안에서 네이버 쇼핑 상품을 직접 fetch.
+//   popup 은 네이버 쿠키 + referer 를 그대로 가지므로 보안 확인 통과 후엔 API 가 바로 응답한다.
+//   (deep-page 누적 로직과 동일한 추출기 — API 후보 → HTML __NEXT_DATA__/__next_f 폴백)
+async function fetchPageInTab(tabId, keyword, pageNum) {
+  const pageUrl = 'https://search.shopping.naver.com/search/all?'
+    + new URLSearchParams({ query: keyword, pagingSize: '80', pagingIndex: String(pageNum || 1), productSet: 'total', sort: 'rel' }).toString();
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: _inTabFetchProducts,
+      args: [pageUrl, keyword, pageNum || 1],
+    });
+    const r = results && results[0] ? results[0].result : null;
+    if (r && Array.isArray(r.products) && r.products.length) return r;
+    if (r && r.error) console.log('[GPAGO bg] fetchPageInTab 진단:', r.error, r.finalUrl || '');
+  } catch (e) { console.warn('[GPAGO bg] fetchPageInTab executeScript 실패:', e?.message || e); }
+  return null;
+}
+
+// v1.7.49+ : 이미 렌더링된 결과 페이지의 라이브 상태를 MAIN world 에서 직접 읽어 상품 추출.
+//   캡차 통과 후 결과는 화면에 떠 있는데 새 fetch 는 안티봇에 또 막히는 케이스 대응.
+//   (inject-naver.js 의 passive 추출 로직을 자기완결적 함수로 이식 — 새 네트워크 요청 없음)
+async function extractLiveStateInTab(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: _inTabExtractLiveState,
+    });
+    const r = results && results[0] ? results[0].result : null;
+    if (r && Array.isArray(r.products) && r.products.length) {
+      console.log('[GPAGO bg] 라이브 상태 추출 (' + r.source + '): ' + r.products.length + '개');
+      return r;
+    }
+  } catch (e) { console.warn('[GPAGO bg] extractLiveStateInTab 실패:', e?.message || e); }
+  return null;
+}
+
+// MAIN world 에서 실행 — 페이지가 이미 그린 데이터(React state / __next_f / 전역 / DOM)에서 상품 배열을 찾음. 자기완결적.
+function _inTabExtractLiveState() {
+  const SKIP = new Set(['_owner','stateNode','return','child','sibling','alternate','firstEffect','lastEffect','nextEffect','dependencies','contextDependencies','_reactInternals','_reactInternalFiber']);
+  function findShoppingResult(obj, depth, visited) {
+    if (!obj || typeof obj !== 'object' || depth > 14 || visited.has(obj)) return null;
+    visited.add(obj);
+    if (Array.isArray(obj)) { for (let i = 0; i < obj.length && i < 120; i++) { const r = findShoppingResult(obj[i], depth + 1, visited); if (r) return r; } return null; }
+    if (obj.shoppingResult && Array.isArray(obj.shoppingResult.products) && obj.shoppingResult.products.length > 0) return obj.shoppingResult;
+    if (Array.isArray(obj.products) && obj.products.length > 0 && typeof obj.query === 'string') return obj;
+    try { for (const k in obj) { if (SKIP.has(k)) continue; const r = findShoppingResult(obj[k], depth + 1, visited); if (r) return r; } } catch (_) {}
+    return null;
+  }
+  function extractBalanced(text, start) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < text.length; i++) { const c = text[i]; if (esc) { esc = false; continue; } if (c === '\\') { esc = true; continue; } if (c === '"') { inStr = !inStr; continue; } if (inStr) continue; if (c === '{') depth++; else if (c === '}') { depth--; if (depth === 0) return text.slice(start, i + 1); } }
+    return null;
+  }
+  function scanString(text) {
+    let idx = 0, tries = 0;
+    while (idx < text.length && tries < 60) {
+      const s = text.indexOf('{', idx); if (s < 0) break;
+      const js = extractBalanced(text, s);
+      if (js && js.length > 200 && (js.includes('"products"') || js.includes('shoppingResult'))) {
+        try { const found = findShoppingResult(JSON.parse(js), 0, new WeakSet()); if (found) return found; } catch (_) {}
+        idx = s + js.length;
+      } else if (js) { idx = s + js.length; } else { idx = s + 1; }
+      tries++;
+    }
+    return null;
+  }
+  // 1) __next_f 전역
+  try {
+    if (self.__next_f && Array.isArray(self.__next_f)) {
+      for (const entry of self.__next_f) { if (!Array.isArray(entry)) continue; for (const part of entry) { if (typeof part !== 'string') continue; if (!part.includes('"products"') && !part.includes('shoppingResult')) continue; const f = scanString(part); if (f) return { products: f.products || [], total: f.total || f.totalCount, source: 'next_f' }; } }
+    }
+  } catch (_) {}
+  // 2) 이름있는 전역
+  try {
+    for (const name of ['__NEXT_DATA__','__INITIAL_STATE__','__PRELOADED_STATE__','__APOLLO_STATE__','__REACT_QUERY_STATE__','__INITIAL_PROPS__','appData','pageData']) {
+      const v = window[name]; if (!v) continue; const f = findShoppingResult(v, 0, new WeakSet()); if (f) return { products: f.products || [], total: f.total || f.totalCount, source: 'global:' + name };
+    }
+  } catch (_) {}
+  // 3) 스크립트 태그
+  try {
+    for (const s of document.querySelectorAll('script')) {
+      const t = s.textContent || ''; if (t.length < 100) continue; if (!t.includes('"products"') && !t.includes('shoppingResult') && !t.includes('__next_f')) continue;
+      try { const f = findShoppingResult(JSON.parse(t), 0, new WeakSet()); if (f) return { products: f.products || [], total: f.total || f.totalCount, source: 'script-json' }; } catch (_) {}
+      const f2 = scanString(t); if (f2) return { products: f2.products || [], total: f2.total || f2.totalCount, source: 'script-scan' };
+    }
+  } catch (_) {}
+  // 4) React fiber
+  try {
+    for (const sel of ['a[href*="/product/"]','a[href*="/catalog/"]','[class*="product"]','[class*="basicList"]','[class*="adProduct"]']) {
+      let els; try { els = document.querySelectorAll(sel); } catch (_) { continue; }
+      for (let i = 0; i < Math.min(els.length, 3); i++) {
+        const el = els[i]; const fk = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')); if (!fk) continue;
+        let fiber = el[fk], depth = 0; const visited = new WeakSet();
+        while (fiber && depth < 60) { const props = fiber.memoizedProps || fiber.pendingProps; if (props) { const f = findShoppingResult(props, 0, visited); if (f) return { products: f.products || [], total: f.total || f.totalCount, source: 'fiber' }; } fiber = fiber.return; depth++; }
+      }
+    }
+  } catch (_) {}
+  return { error: 'live-state not found' };
+}
+
+// 페이지 컨텍스트에서 실행되는 자기완결적(self-contained) 추출 함수 — 외부 스코프 참조 금지.
+function _inTabFetchProducts(url, kw, pageNum) {
+  return (async () => {
+    const SKIP = new Set(['_owner','stateNode','return','child','sibling','alternate','firstEffect','lastEffect']);
+    function collect(o, d, seen, out) {
+      if (!o || typeof o !== 'object' || d > 14 || seen.has(o)) return;
+      seen.add(o);
+      if (o.shoppingResult && Array.isArray(o.shoppingResult.products) && o.shoppingResult.products.length) {
+        out.push({ obj: o.shoppingResult, pri: 1000 + o.shoppingResult.products.length });
+      }
+      if (Array.isArray(o.products) && o.products.length) {
+        const first = o.products[0];
+        if (first && typeof first === 'object' && (first.productTitle || first.productName || first.id || first.nvMid || first.mallProductId)) {
+          out.push({ obj: o, pri: o.products.length });
+        }
+      }
+      if (Array.isArray(o)) { for (let i = 0; i < o.length && i < 300; i++) collect(o[i], d + 1, seen, out); return; }
+      for (const k in o) { if (SKIP.has(k)) continue; if (o[k] && typeof o[k] === 'object') collect(o[k], d + 1, seen, out); }
+    }
+    function best(data) { const out = []; collect(data, 0, new WeakSet(), out); out.sort((a, b) => b.pri - a.pri); return out[0] ? out[0].obj : null; }
+    // 0) API 후보 (popup context — 쿠키/referer 자동 포함)
+    const apiCandidates = [
+      'https://search.shopping.naver.com/api/search/all?' + new URLSearchParams({ query: kw, origQuery: kw, pagingIndex: String(pageNum), pagingSize: '80', productSet: 'total', sort: 'rel', viewType: 'list', iq: '', eq: '', xq: '' }).toString(),
+      'https://search.shopping.naver.com/api/search/products?' + new URLSearchParams({ query: kw, pagingIndex: String(pageNum), pagingSize: '80', sort: 'rel' }).toString(),
+    ];
+    for (const apiUrl of apiCandidates) {
+      try {
+        const r = await fetch(apiUrl, { credentials: 'include', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } });
+        if (!r.ok) continue;
+        const ct = String(r.headers.get('content-type') || '').toLowerCase();
+        if (ct.indexOf('json') < 0) continue;
+        const data = await r.json();
+        const obj = best(data);
+        if (obj && Array.isArray(obj.products) && obj.products.length >= 5) {
+          return { products: obj.products, total: obj.totalCount || obj.total, source: 'API' };
+        }
+      } catch (_) {}
+    }
+    // 1) HTML 폴백 — __NEXT_DATA__ / __next_f
+    try {
+      const res = await fetch(url, { credentials: 'include', headers: { 'Accept': 'text/html' } });
+      if (!res.ok) return { error: 'http ' + res.status, finalUrl: res.url };
+      const html = await res.text();
+      const m = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]+?)<\/script>/);
+      if (m) { try { const obj = best(JSON.parse(m[1])); if (obj) return { products: obj.products || [], total: obj.totalCount || obj.total, source: 'NEXT_DATA' }; } catch (_) {} }
+      const reg = /self\.__next_f\.push\(\[\d+,\s*"((?:[^"\\]|\\.)*)"\s*(?:,\s*"[^"]*")?\s*\]\)/g;
+      let nm;
+      while ((nm = reg.exec(html)) !== null) {
+        let payload; try { payload = JSON.parse('"' + nm[1] + '"'); } catch (_) { continue; }
+        if (!payload.includes('"products"') && !payload.includes('shoppingResult')) continue;
+        let start = 0;
+        while (start < payload.length) {
+          const s = payload.indexOf('{', start); if (s < 0) break;
+          let depth = 0, inStr = false, esc = false, end = -1;
+          for (let i = s; i < payload.length; i++) { const c = payload[i]; if (esc) { esc = false; continue; } if (c === '\\') { esc = true; continue; } if (c === '"') { inStr = !inStr; continue; } if (inStr) continue; if (c === '{') depth++; else if (c === '}') { depth--; if (depth === 0) { end = i + 1; break; } } }
+          if (end < 0) break;
+          const js = payload.slice(s, end);
+          if (js.length > 200 && (js.includes('"products"') || js.includes('shoppingResult'))) {
+            try { const obj = best(JSON.parse(js)); if (obj && (obj.products || []).length) return { products: obj.products, total: obj.totalCount || obj.total, source: '__next_f' }; } catch (_) {}
+          }
+          start = end;
+        }
+      }
+      return { error: 'no products', finalUrl: res.url, hasNextF: html.includes('__next_f') };
+    } catch (e) { return { error: String(e && e.message || e) }; }
+  })();
 }
 
 async function sendToGpago(data) {

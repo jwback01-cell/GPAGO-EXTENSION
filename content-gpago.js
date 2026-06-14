@@ -112,11 +112,32 @@ window.addEventListener('message', (e) => {
       });
     } catch (_) {}
   } else if (e.data.type === 'GPAGO_REQUEST_BIZADVISOR') {
-    // 키워드 성과분석 — 스마트스토어센터 데이터 수집 요청 (v1.7.43+)
-    try { chrome.runtime.sendMessage({ type: 'GPAGO_REQUEST_BIZADVISOR' }); } catch (_) {}
+    // 키워드 성과분석 — 스마트스토어센터 데이터 수집 요청 (v1.7.43+). range: 선택 기간(있으면 배너 안내)
+    try { chrome.runtime.sendMessage({ type: 'GPAGO_REQUEST_BIZADVISOR', range: e.data.range || null }); } catch (_) {}
+  } else if (e.data.type === 'GPAGO_DIRECT_FETCH') {
+    // 키워드 분석 — 백그라운드 직접 fetch (보안창 없이 사용자 IP·쿠키로 SERP 가져오기)
+    try { chrome.runtime.sendMessage({ type: 'GPAGO_DIRECT_FETCH', keyword: e.data.keyword || '', reqId: e.data.reqId || '' }); } catch (_) {}
   } else if (e.data.type === 'GPAGO_GET_TERMS') {
     // 키워드 정확 텀즈(NLU) 조회 (v1.7.48+)
     try { chrome.runtime.sendMessage({ type: 'GPAGO_GET_TERMS', keyword: e.data.keyword || '', reqId: e.data.reqId || '' }); } catch (_) {}
+  } else if (e.data.type === 'GPAGO_BIZ_REPLAY') {
+    // v1.7.57+ : 비즈어드바이저 리포트 재요청(상품별 데이터) — background 가 인증 재사용해 fetch
+    try {
+      chrome.runtime.sendMessage({
+        type: 'GPAGO_BIZ_REPLAY',
+        url: e.data.url || '', method: e.data.method || 'GET',
+        headers: e.data.headers || {}, body: e.data.body || null, reqId: e.data.reqId || ''
+      });
+    } catch (_) {}
+  } else if (e.data.type === 'GPAGO_GET_SELLHA') {
+    // v1.7.52+ : 경쟁사 판매량 — 캐시된 셀하 값(productId 별) 조회. storage 를 직접 읽어 페이지로 회신.
+    const pid = String(e.data.productId || '');
+    const reqId = e.data.reqId || '';
+    (async () => {
+      let sellha = null;
+      try { const key = 'gpago_sellha_' + pid; const o = await chrome.storage.local.get(key); sellha = o[key] || null; } catch (_) {}
+      try { window.postMessage({ source: 'gpago-extension', type: 'GPAGO_SELLHA_RESULT', reqId, productId: pid, sellha }, window.location.origin); } catch (_) {}
+    })();
   }
 });
 
@@ -144,6 +165,12 @@ chrome.runtime.onMessage.addListener((msg) => {
       html: msg.html || null,
       htmlLen: msg.htmlLen || 0
     }, window.location.origin);
+  } else if (msg.type === 'GPAGO_DIRECT_FETCH_RESULT') {
+    // 백그라운드 직접 fetch 결과 → 페이지로 전달
+    window.postMessage({
+      source: 'gpago-extension', type: 'GPAGO_DIRECT_FETCH_RESULT',
+      reqId: msg.reqId || '', ok: !!msg.ok, tabs: msg.tabs || null, error: msg.error || null
+    }, window.location.origin);
   } else if (msg.type === 'GPAGO_TERMS_RESULT') {
     // 키워드 정확 텀즈 결과 → 페이지로 전달 (v1.7.48+)
     window.postMessage({
@@ -153,6 +180,12 @@ chrome.runtime.onMessage.addListener((msg) => {
       keyword: msg.keyword || '',
       terms: msg.terms || null,
       nluTerms: msg.nluTerms || null
+    }, window.location.origin);
+  } else if (msg.type === 'GPAGO_BIZ_REPLAY_RESULT') {
+    window.postMessage({
+      source: 'gpago-extension', type: 'GPAGO_BIZ_REPLAY_RESULT',
+      reqId: msg.reqId || '', ok: !!msg.ok, status: msg.status || 0,
+      data: msg.data || null, error: msg.error || null
     }, window.location.origin);
   } else if (msg.type === 'GPAGO_BIZADVISOR_RESULT') {
     // 스마트스토어센터 수집 결과 → 페이지로 전달 (v1.7.43+)

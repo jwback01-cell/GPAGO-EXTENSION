@@ -22,7 +22,9 @@
   // 요청 메타(메서드/헤더/바디) 전송 — 직접 API 호출용 인증 방식 파악
   function sendReq(url, method, headers, body) {
     try {
-      window.postMessage({ source: 'gpago-biz-inject', type: 'BIZ_REQ', url: String(url), method: method || 'GET', headers: headers || {}, body: (typeof body === 'string' ? body.slice(0, 2000) : null) }, window.location.origin);
+      let abs = String(url || '');
+      try { abs = new URL(abs, location.href).href; } catch (_) {} // 상대경로 → 절대 URL (background 재요청용)
+      window.postMessage({ source: 'gpago-biz-inject', type: 'BIZ_REQ', url: abs, method: method || 'GET', headers: headers || {}, body: (typeof body === 'string' ? body.slice(0, 2000) : null) }, window.location.origin);
     } catch (_) {}
   }
   function _hdrToObj(h) {

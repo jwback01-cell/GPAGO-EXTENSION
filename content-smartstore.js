@@ -41,6 +41,8 @@
       title: null, image: null, description: null,
       reviewCount: null, rating: null, wishCount: null,
       registDate: null, tags: [], category: null, price: null,
+      deliveryFee: null, // 택배비 (0=무료, 숫자=유료, null=미확인)
+      options: null, // 옵션 값 목록 (변경 추적용)
     };
 
     // 1) OG / 메타 태그
@@ -50,6 +52,9 @@
     if (ogImage) result.image = ogImage.content;
     const ogDesc = document.querySelector('meta[property="og:description"]');
     if (ogDesc) result.description = ogDesc.content;
+    // 가격 메타 (가장 신뢰도 높음) — product:price:amount / og:price:amount
+    const ogPrice = document.querySelector('meta[property="product:price:amount"], meta[property="og:price:amount"], meta[name="price"]');
+    if (ogPrice && ogPrice.content) { const v = Number(String(ogPrice.content).replace(/[^\d.]/g, '')); if (v > 0) result.price = result.price == null ? v : result.price; }
 
     // 2) JSON-LD
     const ldScripts = document.querySelectorAll('script[type="application/ld+json"]');
@@ -151,6 +156,37 @@
         }
         const cats = product.fullCategoryName || product.categoryFullName || product.wholeCategoryName;
         if (cats && !result.category) result.category = cats;
+        // 택배비 — 기본 배송비(숫자)를 우선. (CONDITIONAL_FREE=일정금액 이상 무료 → 실제로는 기본배송비 있음)
+        if (result.deliveryFee == null) {
+          const di = product.productDeliveryInfo || product.deliveryInfo || product.delivery || {};
+          const cand = product.deliveryFee != null ? product.deliveryFee
+            : (di.baseFee != null ? di.baseFee
+            : (di.deliveryFee != null ? di.deliveryFee
+            : (di.baseDeliveryFee != null ? di.baseDeliveryFee : null)));
+          const ft = String(di.deliveryFeeType || di.feeType || product.deliveryFeeType || '');
+          if (cand != null && !isNaN(Number(cand))) result.deliveryFee = Number(cand); // 숫자 우선 (3000 등)
+          else if (/^FREE$/i.test(ft) || ft === '무료') result.deliveryFee = 0; // 순수 무료만 0 (CONDITIONAL_FREE 제외)
+        }
+        // 옵션 값 목록 (컬러/사이즈/추가옵션 등) — 변경 추적용
+        if (result.options == null) {
+          try {
+            const po = product.productOptions || product.optionInfo || {};
+            const combos = product.optionCombinations || product.optionCombinationList
+              || po.optionCombinations || po.combinations || po.optionCombinationList || [];
+            const set = [];
+            if (Array.isArray(combos)) {
+              for (const c of combos) {
+                if (!c || typeof c !== 'object') continue;
+                const parts = [c.optionName1, c.optionName2, c.optionName3, c.optionName4, c.name, c.value, c.text]
+                  .filter(v => typeof v === 'string' && v.trim());
+                if (parts.length) set.push(parts.join(' / ').trim());
+              }
+            }
+            const stds = product.optionStandards || po.optionStandards || product.standardOptions || [];
+            if (Array.isArray(stds)) for (const s of stds) { if (s && typeof s === 'object') { const n = s.optionName || s.name || s.value; if (typeof n === 'string' && n.trim()) set.push(n.trim()); } }
+            if (set.length) result.options = Array.from(new Set(set)).slice(0, 300);
+          } catch (_) {}
+        }
       }
     }
 
@@ -250,6 +286,13 @@
                   text.match(/등록\s*[:：]?\s*(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})/) ||
                   text.match(/(\d{4}\.\d{2}\.\d{2})\s*등록/);
         if (m) r.registDate = m[1].replace(/[.\/]/g, '-');
+      }
+      // 택배비 (state 에서 못 잡았을 때 DOM 텍스트로) — '배송비 N원'(기본배송비) 우선,
+      //   조건부 '50,000원 이상 무료배송' 문구를 무료로 오인하지 않도록 숫자를 먼저 매칭
+      if (r.deliveryFee == null && text) {
+        const m = text.match(/배송비\s*[:：]?\s*([\d,]+)\s*원/);
+        if (m) r.deliveryFee = Number(m[1].replace(/,/g, ''));
+        else if (/배송비\s*무료|무료\s*배송/.test(text)) r.deliveryFee = 0;
       }
       // v1.7.13+ 최종 검증 : 평점이 0 이면 리뷰가 없는 상품 → 잘못 잡힌 리뷰 수 교정 (override)
       //   (Naver 는 0점 리뷰를 허용 안 함 → rating=0 이면 리뷰 수는 반드시 0)
@@ -385,6 +428,88 @@
     return m ? m[1] : '';
   }
 
+  // v1.7.51+ : 셀하(sellha) 등 외부 확장이 페이지에 주입한 패널에서 최근 판매량 읽기 (설치돼 있을 때만)
+  //   "배송건수(7일) 9건 / 예상매출(7일) 89,100원" 같은 텍스트를 파싱 → 최근 실판매 근사
+  function _collectAllText() {
+    let txt = document.body ? (document.body.innerText || '') : '';
+    try {
+      const walk = (root, depth) => {
+        if (depth > 4) return;
+        const els = root.querySelectorAll('*');
+        for (let i = 0; i < els.length; i++) {
+          const sr = els[i].shadowRoot;
+          if (sr) { try { txt += '\n' + (sr.textContent || ''); walk(sr, depth + 1); } catch (_) {} }
+        }
+      };
+      walk(document, 0);
+    } catch (_) {}
+    return txt;
+  }
+  function getSellhaData() {
+    try {
+      const t = _collectAllText();
+      if (!t || (!t.includes('배송건수') && !t.includes('예상매출'))) return null;
+      const num = (re) => { const m = t.match(re); return m ? Number(m[1].replace(/,/g, '')) : null; };
+      const out = {};
+      const d7 = num(/배송건수\s*\(?\s*7일\s*\)?\s*[:：]?\s*([\d,]+)\s*건/);
+      const r7 = num(/예상\s*매출\s*\(?\s*7일\s*\)?\s*[:：]?\s*([\d,]+)\s*원/);
+      const r30 = num(/예상\s*매출\s*\(?\s*(?:30일|월)\s*\)?\s*[:：]?\s*([\d,]+)\s*원/);
+      if (d7 != null) out.deliver7d = d7;
+      if (r7 != null) out.revenue7d = r7;
+      if (r30 != null) out.revenue30d = r30;
+      out.at = Date.now();
+      return (out.deliver7d != null || out.revenue7d != null) ? out : null;
+    } catch (_) { return null; }
+  }
+
+  // v1.7.53+ : 최근 리뷰 수(7일/30일)를 네이버 리뷰 API 로 직접 집계 → 셀하 없이도 헤드리스로 최근 판매 추정.
+  //   (page origin 이라 쿠키/Referer 자동 — product-summary 와 동일 베이스)
+  let _recentReviews = null, _recentReviewsDone = false;
+  async function fetchRecentReviewCounts(productId) {
+    if (!productId) return null;
+    const now = Date.now(), D7 = now - 7 * 864e5, D30 = now - 30 * 864e5;
+    let c7 = 0, c30 = 0, total = null, scanned = 0;
+    const parseDate = (rv) => {
+      const ds = rv && (rv.createDate || rv.writeDate || rv.registerDate || rv.createdDate || rv.regDate || rv.reviewCreateDate || rv.created);
+      const t = ds ? new Date(ds).getTime() : NaN; return isNaN(t) ? null : t;
+    };
+    const getList = (data) => (data && (data.contents || data.reviewContents || data.list || data.reviews)) || (Array.isArray(data) ? data : []);
+    for (let page = 1; page <= 4; page++) {
+      let data = null;
+      const qs = new URLSearchParams({ page: String(page), pageSize: '50', reviewSearchSortType: 'REVIEW_CREATE_DATE_DESC' });
+      const candidates = [
+        { url: 'https://smartstore.naver.com/i/v1/contents/reviews/query-pages?' + qs.toString() + '&productNo=' + productId, opt: { method: 'GET' } },
+        { url: 'https://smartstore.naver.com/i/v1/contents/reviews/query-pages?' + qs.toString() + '&originProductNo=' + productId, opt: { method: 'GET' } },
+        { url: 'https://smartstore.naver.com/i/v1/contents/reviews/query-pages', opt: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ page, pageSize: 50, reviewSearchSortType: 'REVIEW_CREATE_DATE_DESC', productNo: Number(productId), originProductNo: Number(productId) }) } },
+      ];
+      for (const ep of candidates) {
+        try {
+          const r = await fetch(ep.url, Object.assign({ credentials: 'include', headers: Object.assign({ Accept: 'application/json' }, ep.opt.headers || {}) }, ep.opt));
+          if (!r.ok) continue;
+          const ct = String(r.headers.get('content-type') || '').toLowerCase();
+          if (ct.indexOf('json') < 0) continue;
+          const j = await r.json();
+          if (j && getList(j).length) { data = j; break; }
+          if (j && data == null) data = j;
+        } catch (_) {}
+      }
+      if (!data) break;
+      const list = getList(data);
+      if (total == null) total = (data.totalElements != null ? Number(data.totalElements) : (data.totalCount != null ? Number(data.totalCount) : null));
+      if (!list.length) break;
+      let allOld = true;
+      for (const rv of list) { const t = parseDate(rv); if (t == null) continue; scanned++; if (t >= D7) c7++; if (t >= D30) { c30++; allOld = false; } }
+      if (allOld) break; // 이 페이지가 전부 30일 이전 → 더 볼 필요 없음
+    }
+    if (!scanned) return null;
+    return { reviews7d: c7, reviews30d: c30, total: total };
+  }
+  // 스크립트 시작 즉시 백그라운드로 최근 리뷰 집계 시작 (page origin)
+  (async () => {
+    try { _recentReviews = await fetchRecentReviewCounts(getProductIdFromUrl()); } catch (_) {}
+    _recentReviewsDone = true;
+  })();
+
   async function tryExtractAndSend() {
     if (sent) return;
     attempts++;
@@ -415,9 +540,34 @@
         data.reviewCount = 0;
       }
     }
+    // v1.7.51+ : 셀하(외부 확장) 최근 판매량 패널 읽기 (설치돼 있을 때만)
+    const sh = getSellhaData();
+    if (sh) {
+      data.sellha = sh;
+      // v1.7.52+ : 사용자가 이 상품 페이지를 (셀하 켠 채) 볼 때마다 productId 별로 캐시 →
+      //   GPAGO 경쟁사 갱신 때 백그라운드 창에서 셀하가 안 떠도 이 캐시를 사용
+      try {
+        const pid = getProductIdFromUrl();
+        if (pid && chrome.runtime && chrome.runtime.id) {
+          chrome.storage.local.set({ ['gpago_sellha_' + pid]: Object.assign({ productId: pid }, sh) });
+        }
+      } catch (_) {}
+    }
     const fullyOk = isFullyMeaningful(data);
     const anyOk = hasAnyData(data);
-    if (fullyOk || attempts >= MAX_ATTEMPTS) {
+    // 셀하가 페이지에 로딩 중(헤더만 보이고 수치는 아직)일 수 있어, 감지되면 6회까지 한 번 더 대기.
+    //   (셀하 미설치 사용자는 sellhaLoading=false → 추가 대기 없음 — 속도 영향 없음)
+    let sellhaLoading = false;
+    try {
+      sellhaLoading = !data.sellha && (
+        /sellha|셀하|배송건수|예상\s*매출/i.test((document.body && document.body.innerText) || '') ||
+        !!document.querySelector('[class*="sellha" i],[id*="sellha" i]')
+      );
+    } catch (_) {}
+    // v1.7.53+ : 최근 리뷰 집계(헤드리스 판매량) 포함 — 셀하 없이도 동작
+    if (_recentReviews) data.recentReviews = _recentReviews;
+    const recentLoading = !_recentReviewsDone && attempts < 5;
+    if ((fullyOk && !(sellhaLoading && attempts < 6) && !recentLoading) || attempts >= MAX_ATTEMPTS) {
       sent = true;
       try {
         chrome.runtime.sendMessage({
@@ -441,4 +591,25 @@
   }
   // 안전망 — load 이벤트 후 한 번 더 시도
   window.addEventListener('load', () => setTimeout(tryExtractAndSend, 1500));
+
+  // v1.7.52+ : 셀하 값 캐시 전용 폴러 — 추출/전송 흐름과 무관하게, 셀하 패널이 뜨면
+  //   productId 별로 chrome.storage 에 저장. 사용자가 평소 상품 페이지를 보기만 해도
+  //   GPAGO 경쟁사 갱신이 이 캐시를 사용한다. (최대 ~45초간 폴링, 잡으면 종료)
+  (function sellhaCachePoll() {
+    let n = 0;
+    const iv = setInterval(() => {
+      n++;
+      try {
+        const sh = getSellhaData();
+        if (sh) {
+          const pid = getProductIdFromUrl();
+          if (pid && chrome.runtime && chrome.runtime.id) {
+            chrome.storage.local.set({ ['gpago_sellha_' + pid]: Object.assign({ productId: pid }, sh) });
+          }
+          clearInterval(iv);
+        }
+      } catch (_) { clearInterval(iv); }
+      if (n >= 30) clearInterval(iv); // 1.5s × 30 = 45s
+    }, 1500);
+  })();
 })();
