@@ -169,9 +169,9 @@ async function readGpagoNKeyword(tabId) {
 async function tryDirectFetchSearch(keyword, productSet) {
   const url = 'https://search.shopping.naver.com/search/all?'
     + new URLSearchParams({ query: keyword, pagingSize: '80', productSet }).toString();
-  // v1.7.35+ : 4초 타임아웃 — Naver 가 느릴 때 즉시 popup 폴백
+  // 타임아웃 — 직접 fetch 가 주 경로가 되면서 9초로 상향(로그인 SERP 가 느릴 때 false 실패 방지)
   const ctrl = new AbortController();
-  const timeoutId = setTimeout(() => ctrl.abort(), 4000);
+  const timeoutId = setTimeout(() => ctrl.abort(), 9000);
   try {
     const res = await fetch(url, {
       credentials: 'include',
