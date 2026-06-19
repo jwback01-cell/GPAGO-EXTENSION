@@ -165,32 +165,17 @@ async function readGpagoNKeyword(tabId) {
 }
 
 // GPAGO 탭에서 트리거 — N 입력값으로 새 네이버 탭 열고 캡처
-// v1.7.41+ : background 에서 Naver search HTML 직접 fetch + __NEXT_DATA__ 파싱
+// background 에서 Naver 쇼핑 검색 직접 fetch
+//   네이버가 페이지 구조를 바꿔 __NEXT_DATA__ 가 사라질 수 있으므로
+//   1) 내부 JSON API → 2) __NEXT_DATA__ → 3) __next_f 스트리밍 순으로 파싱
 async function tryDirectFetchSearch(keyword, productSet) {
-  const url = 'https://search.shopping.naver.com/search/all?'
-    + new URLSearchParams({ query: keyword, pagingSize: '80', productSet }).toString();
-  // 타임아웃 — 직접 fetch 가 주 경로가 되면서 9초로 상향(로그인 SERP 가 느릴 때 false 실패 방지)
   const ctrl = new AbortController();
   const timeoutId = setTimeout(() => ctrl.abort(), 9000);
-  try {
-    const res = await fetch(url, {
-      credentials: 'include',
-      signal: ctrl.signal,
-      headers: {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
-      },
-    });
-    clearTimeout(timeoutId);
-    if (!res.ok) return null;
-    const html = await res.text();
-    const m = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]+?)<\/script>/);
-    if (!m) return null;
-    const data = JSON.parse(m[1]);
-    const SKIP = new Set(['_owner','stateNode','return','child','sibling','alternate']);
+  const SKIP = new Set(['_owner','stateNode','return','child','sibling','alternate','firstEffect','lastEffect']);
+  function bestOf(data) {
     const out = [];
-    function collect(o, d, seen) {
-      if (!o || typeof o !== 'object' || d > 12 || seen.has(o)) return;
+    (function collect(o, d, seen) {
+      if (!o || typeof o !== 'object' || d > 14 || seen.has(o)) return;
       seen.add(o);
       if (o.shoppingResult && Array.isArray(o.shoppingResult.products) && o.shoppingResult.products.length) {
         out.push({ obj: o.shoppingResult, pri: 1000 + o.shoppingResult.products.length });
@@ -201,24 +186,61 @@ async function tryDirectFetchSearch(keyword, productSet) {
           out.push({ obj: o, pri: o.products.length });
         }
       }
-      if (Array.isArray(o)) { for (let i = 0; i < o.length && i < 300; i++) collect(o[i], d + 1, seen); return; }
+      if (Array.isArray(o)) { for (let i = 0; i < o.length && i < 400; i++) collect(o[i], d + 1, seen); return; }
       for (const k in o) { if (SKIP.has(k)) continue; if (o[k] && typeof o[k] === 'object') collect(o[k], d + 1, seen); }
-    }
-    collect(data, 0, new WeakSet());
+    })(data, 0, new WeakSet());
     out.sort((a, b) => b.pri - a.pri);
-    // v1.7.42+ : 옵션 필터된 검색은 결과가 적을 수 있어 임계값 낮춤 (40→10)
-    if (!out[0] || !Array.isArray(out[0].obj.products) || out[0].obj.products.length < 10) return null;
-    const sr = out[0].obj;
-    return {
-      query: keyword,
-      products: sr.products.map(_slimProduct),
-      terms: sr.terms,
-      nluTerms: sr.nluTerms,
-      searchParam: { productSet },
-      total: sr.totalCount || sr.total,
-    };
-  } catch (_) { return null; }
-  finally { clearTimeout(timeoutId); }
+    return out[0] ? out[0].obj : null;
+  }
+  const pack = (sr) => ({
+    query: keyword,
+    products: (sr.products || []).map(_slimProduct),
+    terms: sr.terms, nluTerms: sr.nluTerms,
+    searchParam: { productSet }, total: sr.totalCount || sr.total,
+  });
+  const done = (v) => { clearTimeout(timeoutId); return v; };
+  try {
+    // 1) 내부 JSON API (가장 안정적 — 페이지 구조 변경에 영향 없음)
+    const apiCandidates = [
+      'https://search.shopping.naver.com/api/search/all?' + new URLSearchParams({ query: keyword, origQuery: keyword, pagingIndex: '1', pagingSize: '80', productSet: productSet || 'total', sort: 'rel', viewType: 'list', iq: '', eq: '', xq: '' }).toString(),
+      'https://search.shopping.naver.com/api/search/all?' + new URLSearchParams({ query: keyword, origQuery: keyword, pagingIndex: '1', pagingSize: '80', productSet: 'total', sort: 'rel', viewType: 'list', iq: '', eq: '', xq: '' }).toString(),
+    ];
+    for (const apiUrl of apiCandidates) {
+      try {
+        const r = await fetch(apiUrl, { credentials: 'include', signal: ctrl.signal, headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'Accept-Language': 'ko-KR,ko;q=0.9' } });
+        if (!r.ok) continue;
+        if (String(r.headers.get('content-type') || '').toLowerCase().indexOf('json') < 0) continue;
+        const sr = bestOf(await r.json());
+        if (sr && Array.isArray(sr.products) && sr.products.length >= 5) return done(pack(sr));
+      } catch (_) {}
+    }
+    // 2) HTML __NEXT_DATA__ / 3) __next_f
+    const url = 'https://search.shopping.naver.com/search/all?' + new URLSearchParams({ query: keyword, pagingSize: '80', productSet }).toString();
+    const res = await fetch(url, { credentials: 'include', signal: ctrl.signal, headers: { 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8', 'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8' } });
+    if (!res.ok) return done(null);
+    const html = await res.text();
+    const m = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]+?)<\/script>/);
+    if (m) { try { const sr = bestOf(JSON.parse(m[1])); if (sr && (sr.products || []).length >= 5) return done(pack(sr)); } catch (_) {} }
+    const reg = /self\.__next_f\.push\(\[\d+,\s*"((?:[^"\\]|\\.)*)"/g;
+    let nm;
+    while ((nm = reg.exec(html)) !== null) {
+      let payload; try { payload = JSON.parse('"' + nm[1] + '"'); } catch (_) { continue; }
+      if (!payload.includes('"products"') && !payload.includes('shoppingResult')) continue;
+      let start = 0;
+      while (start < payload.length) {
+        const s = payload.indexOf('{', start); if (s < 0) break;
+        let depth = 0, inStr = false, esc = false, end = -1;
+        for (let i = s; i < payload.length; i++) { const c = payload[i]; if (esc) { esc = false; continue; } if (c === '\\') { esc = true; continue; } if (c === '"') { inStr = !inStr; continue; } if (inStr) continue; if (c === '{') depth++; else if (c === '}') { depth--; if (depth === 0) { end = i + 1; break; } } }
+        if (end < 0) break;
+        const js = payload.slice(s, end);
+        if (js.length > 200 && (js.includes('"products"') || js.includes('shoppingResult'))) {
+          try { const sr = bestOf(JSON.parse(js)); if (sr && (sr.products || []).length >= 5) return done(pack(sr)); } catch (_) {}
+        }
+        start = end;
+      }
+    }
+    return done(null);
+  } catch (_) { return done(null); }
 }
 
 // v1.7.48+ : 키워드 정확 텀즈(NLU) 조회 — 네이버 쇼핑 검색 직접 fetch 후 terms/nluTerms 만 추출 (상품수 무관)
